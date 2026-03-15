@@ -1,7 +1,11 @@
 package apperr
 
-// Error code ranges:
-// 1000-1999: User service
+// 错误码按服务域分段，避免跨服务冲突，前端可直接用 switch 判断。
+// 为什么用数字而不是字符串？数字比较快、不会拼错、方便前端 switch。
+//
+// 分段规则：
+// 1000-1099: 通用错误（所有服务共用）
+// 1100-1199: User service 业务错误
 // 2000-2999: Product service
 // 3000-3999: Cart service
 // 4000-4999: Order service

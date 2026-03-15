@@ -14,10 +14,13 @@ type contextKey string
 
 const traceIDKey contextKey = "traceId"
 
-// Client is an HTTP client for inter-service communication.
-// It automatically injects traceId and internal auth headers.
+// Client 用于微服务间 HTTP 通信，自动注入 traceId 和内部认证头。
+// 为什么封装而不是直接用 http.Client？三个原因：
+// 1. 自动传递 traceId，实现全链路追踪
+// 2. 自动注入 X-Internal-Secret，内部服务间鉴权
+// 3. 统一超时和错误处理，避免每个调用点重复代码
 type Client struct {
-	httpClient     *http.Client
+	httpClient     *http.Client // 复用同一个 Client 实例，内部维护了连接池，不要每次请求都创建新的
 	internalSecret string
 }
 
@@ -64,7 +67,7 @@ func (c *Client) Post(ctx context.Context, url string, body any, result any) err
 	if err != nil {
 		return fmt.Errorf("do request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() // 必须关闭响应体，否则 TCP 连接无法回到连接池，导致连接泄露
 
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)

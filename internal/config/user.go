@@ -2,7 +2,9 @@ package config
 
 import "github.com/knadh/koanf/v2"
 
-// UserServiceConfig holds configuration for the User service.
+// UserServiceConfig 只包含用户服务需要的配置项。
+// 每个服务有独立的 Config struct，避免加载不需要的配置——比如 Cart 服务不需要 JWT 配置。
+// Common 通过结构体嵌入获得公共字段（AppEnv、LogLevel），这是 Go 的"组合优于继承"。
 type UserServiceConfig struct {
 	Common
 	Postgres Postgres `koanf:"postgres"`

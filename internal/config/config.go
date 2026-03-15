@@ -42,12 +42,16 @@ type CORS struct {
 	Origins []string `koanf:"cors_origins"`
 }
 
-// Load reads environment variables into a koanf instance.
-// All env vars are lowercased and mapped to koanf keys.
-// Example: DATABASE_URL -> database_url
+// Load 从环境变量加载配置到 koanf。
+// 为什么用 koanf 而不是直接 os.Getenv？koanf 提供类型安全的访问（String/Duration/Int），
+// 且禁止在业务代码中散落 os.Getenv 调用，所有配置读取集中在 config 包。
+// 分隔符用 "." 而不是 "_"，是为了避免 koanf 把 DATABASE_URL 拆成嵌套结构 database.url。
 func Load() (*koanf.Koanf, error) {
 	k := koanf.New(".")
 
+	// 前缀 "" 表示不过滤，读取所有环境变量。
+	// 分隔符 "." 表示用点号分隔嵌套键（但我们用扁平键所以实际不触发）。
+	// 转换函数把 DATABASE_URL → database_url，统一用小写键名。
 	err := k.Load(env.Provider("", ".", func(s string) string {
 		return strings.ToLower(s)
 	}), nil)

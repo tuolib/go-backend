@@ -23,7 +23,8 @@ func main() {
 	// Global health check
 	r.Post("/health", handler.Wrap(healthHandler))
 
-	// Mount service routes (Phase 0: only health endpoints)
+	// 单体模式：所有服务的路由挂在同一个进程里，内部调用零网络开销。
+	// 微服务模式下这些路由分散在各自的 cmd/*/main.go 中。
 	r.Route("/api/v1/user", func(r chi.Router) {
 		r.Post("/health", handler.Wrap(serviceHealth("user")))
 	})
@@ -68,6 +69,8 @@ func healthHandler(w http.ResponseWriter, r *http.Request) error {
 	})
 }
 
+// serviceHealth 是高阶函数：返回一个闭包，闭包"记住"了 name 参数。
+// 这样不用为每个服务写一个几乎一样的 handler 函数。
 func serviceHealth(name string) handler.AppHandler {
 	return func(w http.ResponseWriter, r *http.Request) error {
 		return response.Success(w, r, map[string]string{
