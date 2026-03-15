@@ -59,11 +59,15 @@
 
 **chi over Gin/Echo：** 基于 stdlib `net/http`，不隐藏标准库，中间件模式与标准库兼容。Go 社区推荐的"薄框架"理念。
 
-**sqlc over GORM/Ent：** SQL-first 设计，从 SQL 查询编译生成类型安全 Go 代码，与 TS 版的 Drizzle SQL-first 哲学一致。零运行时反射，编译时类型检查。
+**sqlc + squirrel（双查询策略）：** sqlc 从 SQL 编译生成类型安全 Go 代码，处理固定 CRUD 查询；squirrel 运行时构建动态筛选/搜索 SQL（解决 sqlc 无法处理可选 WHERE 条件的局限）。两者配合覆盖所有查询场景。
 
 **pgx over database/sql：** Go 生态最佳 PostgreSQL 驱动，内置连接池（pgxpool），支持 LISTEN/NOTIFY、COPY、自定义类型，性能优于标准库。
 
 **koanf over Viper：** 无全局状态，类型安全，更模块化。Viper 的全局单例模式不符合 Go 的依赖注入最佳实践。
+
+**singleflight：** 进程内缓存击穿防护。当多个 goroutine 同时请求同一个缓存 key（miss），singleflight 确保只有一个 goroutine 执行回源查询，其余等待结果共享。与 Redis 分布式锁互补——singleflight 防单进程内的重复回源，分布式锁防跨实例的缓存击穿。
+
+**testcontainers-go：** 集成测试自动启停真实 PG/Redis 容器，无需预装外部依赖，测试结果可靠且可复现。
 
 **Caddy：** 复用 TS 版配置，自动 HTTPS，Go 编写，配置极简。
 
@@ -71,23 +75,175 @@
 
 ---
 
-## 2. Go 与 TS 版本的关键差异
+## 2. 双模式运行架构
+
+本项目支持**单体模式（monolith）**和**微服务模式（microservices）**双模式运行，利用 Go 的优势在同一套代码上实现两种部署形态。
+
+### 2.1 模式对比
+
+| 方面 | 单体模式 | 微服务模式 |
+|------|---------|-----------|
+| 入口 | `cmd/monolith/main.go` | `cmd/{gateway,user,product,cart,order}/main.go` |
+| 服务间调用 | 直接函数调用（零网络开销） | HTTP 内部接口 |
+| 适用场景 | 本地开发、单机部署 | 生产环境独立扩缩容 |
+| 启动命令 | `make dev` | Docker Compose 启动 5 个容器 |
+
+### 2.2 服务接口抽象
+
+服务间依赖通过 Go 接口定义。每个接口有两种实现：
+
+```go
+// order 包内定义依赖接口（消费方定义）
+type ProductQuerier interface {
+    BatchGetSKUs(ctx context.Context, skuIDs []string) ([]SKUInfo, error)
+    ReserveStock(ctx context.Context, items []StockItem, orderID string) error
+    ReleaseStock(ctx context.Context, items []StockItem, orderID string) error
+}
+
+type UserQuerier interface {
+    GetAddress(ctx context.Context, addressID, userID string) (*Address, error)
+    GetUser(ctx context.Context, userID string) (*UserInfo, error)
+}
+
+type CartCleaner interface {
+    ClearItems(ctx context.Context, userID string, skuIDs []string) error
+}
+```
+
+```go
+// 微服务模式：HTTP 实现（通过 httpclient 调用 /internal/* 端点）
+type httpProductClient struct {
+    client *httpclient.InternalClient
+}
+
+func (c *httpProductClient) BatchGetSKUs(ctx context.Context, skuIDs []string) ([]SKUInfo, error) {
+    var result []SKUInfo
+    err := c.client.Post(ctx, "/internal/product/sku/batch", map[string]any{"skuIds": skuIDs}, &result)
+    return result, err
+}
+
+// 单体模式：直接调用（零网络开销）
+type localProductClient struct {
+    stockService *product.StockService
+    skuRepo      *product.SKURepository
+}
+
+func (c *localProductClient) BatchGetSKUs(ctx context.Context, skuIDs []string) ([]SKUInfo, error) {
+    return c.skuRepo.BatchGet(ctx, skuIDs)
+}
+```
+
+### 2.3 单体模式入口
+
+```go
+// cmd/monolith/main.go
+func main() {
+    // 加载配置
+    cfg := config.LoadAll()
+
+    // 初始化共享基础设施
+    pool := database.NewPool(cfg.Database)
+    rdb := database.NewRedis(cfg.Redis)
+
+    // 初始化所有 service（共享连接池）
+    userService := user.NewService(pool, rdb, cfg.User)
+    productService := product.NewService(pool, rdb, cfg.Product)
+    cartService := cart.NewService(rdb, cfg.Cart)
+    orderService := order.NewService(pool, rdb, cfg.Order,
+        // 注入 local 实现（直接函数调用）
+        &localProductClient{stockService: productService.Stock, skuRepo: productService.SKURepo},
+        &localUserClient{service: userService},
+        &localCartClient{service: cartService},
+    )
+
+    // 组装路由（所有服务挂载到同一个 chi.Router）
+    r := chi.NewRouter()
+    r.Use(middleware.RequestID, middleware.Logger, middleware.CORS, middleware.RateLimit)
+
+    user.MountRoutes(r, userService)
+    product.MountRoutes(r, productService)
+    cart.MountRoutes(r, cartService)
+    order.MountRoutes(r, orderService)
+
+    // 启动单个 HTTP 服务器
+    srv := &http.Server{Addr: ":3000", Handler: r}
+    // ... 优雅关停 ...
+}
+```
+
+### 2.4 微服务模式入口
+
+```go
+// cmd/order/main.go
+func main() {
+    cfg := config.LoadOrder()
+    pool := database.NewPool(cfg.Database)
+    rdb := database.NewRedis(cfg.Redis)
+
+    orderService := order.NewService(pool, rdb, cfg,
+        // 注入 HTTP 实现（通过网络调用其他服务）
+        &httpProductClient{client: httpclient.New(cfg.ProductServiceURL)},
+        &httpUserClient{client: httpclient.New(cfg.UserServiceURL)},
+        &httpCartClient{client: httpclient.New(cfg.CartServiceURL)},
+    )
+
+    r := chi.NewRouter()
+    order.MountRoutes(r, orderService)
+
+    srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
+    // ... 优雅关停 ...
+}
+```
+
+---
+
+## 3. Go 与 TS 版本的关键差异
 
 | 方面 | TS (Hono + Bun) | Go (chi + stdlib) |
 |------|-----------------|-------------------|
-| 错误处理 | `throw AppError` → 全局 catch | `return error` → 逐层检查 |
+| 错误处理 | `throw AppError` → 全局 catch | `return error` → Handler Wrap 包装器 |
 | 上下文传递 | AsyncLocalStorage（隐式） | `context.Context`（显式第一参数） |
 | 校验 | Zod schema 对象 | struct tag `validate:"required,email"` |
 | 中间件 | `async (c, next) => {}` | `func(next http.Handler) http.Handler` |
-| 数据库查询 | Drizzle 运行时构建 | sqlc 编译时生成 |
+| 数据库查询 | Drizzle 运行时构建 | sqlc 编译时生成 + squirrel 动态构建 |
 | 依赖注入 | 模块导入 | 构造函数注入（接口） |
 | 并发 | `Promise.all` | `goroutine + errgroup` |
 | 关停 | `process.on('SIGTERM')` | `signal.NotifyContext + WaitGroup` |
 | JSON 序列化 | 原生支持 | `encoding/json` + struct tag |
-| 部署产物 | Docker + Bun 运行时 | 静态编译单二进制 |
+| 部署产物 | Docker + Bun 运行时 | 静态编译单二进制（go:embed 嵌入 Lua） |
 | 包管理 | npm workspace（monorepo） | 单 `go.mod`（所有服务共享） |
+| 运行模式 | 只有微服务模式 | 单体 + 微服务双模式 |
+| 缓存击穿 | 无专门处理 | singleflight 进程内防护 |
+| 集成测试 | 外部 PG/Redis | testcontainers 自动启停 |
 
 ### Go 特有模式
+
+**Handler Wrap 模式（替代 recovery 中间件 + 全局 catch）：**
+```go
+// internal/handler/wrap.go
+type AppHandler func(w http.ResponseWriter, r *http.Request) error
+
+func Wrap(h AppHandler) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        if err := h(w, r); err != nil {
+            response.HandleError(w, r, err)  // AppError → HTTP 响应，未知 error → 500
+        }
+    }
+}
+
+// handler 不需要自己处理错误格式化
+func (h *UserHandler) Profile(w http.ResponseWriter, r *http.Request) error {
+    userID := middleware.UserIDFrom(r.Context())
+    user, err := h.service.GetProfile(r.Context(), userID)
+    if err != nil {
+        return err  // 直接返回，Wrap 处理
+    }
+    return response.Success(w, r, user)
+}
+
+// 路由注册
+r.Post("/api/v1/user/profile", handler.Wrap(h.Profile))
+```
 
 **错误 wrapping：**
 ```go
@@ -111,7 +267,7 @@ for _, tt := range tests {
 }
 ```
 
-**Lua 脚本嵌入：**
+**Lua 脚本嵌入（go:embed，编译进二进制）：**
 ```go
 import _ "embed"
 
@@ -126,6 +282,19 @@ defer stop()
 // ... start server ...
 <-ctx.Done()
 srv.Shutdown(timeoutCtx)
+```
+
+**singleflight 缓存击穿防护：**
+```go
+var group singleflight.Group
+
+func (s *ProductService) GetDetail(ctx context.Context, id string) (*Product, error) {
+    v, err, _ := group.Do("product:"+id, func() (interface{}, error) {
+        // 只有一个 goroutine 执行，其余等待共享结果
+        return s.loadFromDBAndCache(ctx, id)
+    })
+    return v.(*Product), err
+}
 ```
 
 ---
@@ -228,7 +397,59 @@ created_at  TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
 updated_at  TIMESTAMPTZ    NOT NULL DEFAULT NOW()
 ```
 
-### 4.3 User Service 表结构
+### 4.3 查询策略 — sqlc + squirrel
+
+**固定 CRUD → sqlc（编译时类型安全）：**
+
+```sql
+-- internal/database/queries/users.sql
+
+-- name: GetUserByEmail :one
+SELECT * FROM user_service.users WHERE email = $1 AND deleted_at IS NULL;
+
+-- name: CreateUser :one
+INSERT INTO user_service.users (id, email, password, nickname, created_at, updated_at)
+VALUES ($1, $2, $3, $4, NOW(), NOW())
+RETURNING *;
+```
+
+**动态筛选/搜索 → squirrel（运行时构建，参数化防注入）：**
+
+```go
+import sq "github.com/Masterminds/squirrel"
+
+// squirrel 使用 PostgreSQL 风格占位符
+var psql = sq.StatementBuilder.PlaceholderFormat(sq.Dollar)
+
+func (r *ProductRepo) Search(ctx context.Context, input SearchInput) ([]Product, error) {
+    qb := psql.Select("id", "title", "min_price", "total_sales").
+        From("product_service.products").
+        Where("status = 'active'").
+        Where("deleted_at IS NULL")
+
+    if input.Keyword != "" {
+        qb = qb.Where(
+            "to_tsvector('simple', title || ' ' || coalesce(description,'') || ' ' || coalesce(brand,'')) @@ plainto_tsquery('simple', ?)",
+            input.Keyword,
+        )
+    }
+    if input.CategoryID != "" {
+        qb = qb.Where("id IN (SELECT product_id FROM product_service.product_categories WHERE category_id = ?)", input.CategoryID)
+    }
+    if input.PriceMin > 0 {
+        qb = qb.Where("min_price >= ?", input.PriceMin)
+    }
+    if input.PriceMax > 0 {
+        qb = qb.Where("max_price <= ?", input.PriceMax)
+    }
+
+    sql, args, _ := qb.ToSql()
+    rows, err := r.pool.Query(ctx, sql, args...)
+    // ...
+}
+```
+
+### 4.4 User Service 表结构
 
 ```
 ┌─────────────────────────────────────┐
@@ -277,7 +498,7 @@ updated_at  TIMESTAMPTZ    NOT NULL DEFAULT NOW()
 └─────────────────────────────────────┘
 ```
 
-### 4.4 Product Service 表结构
+### 4.5 Product Service 表结构
 
 ```
 ┌─────────────────────────────────────┐
@@ -372,7 +593,7 @@ updated_at  TIMESTAMPTZ    NOT NULL DEFAULT NOW()
 └─────────────────────────────────────┘
 ```
 
-### 4.5 Order Service 表结构
+### 4.6 Order Service 表结构
 
 ```
 ┌─────────────────────────────────────────┐
@@ -460,7 +681,7 @@ updated_at  TIMESTAMPTZ    NOT NULL DEFAULT NOW()
 └─────────────────────────────────────────┘
 ```
 
-### 4.6 索引策略
+### 4.7 索引策略
 
 ```sql
 -- User Service
@@ -560,7 +781,9 @@ Cache-Aside 模式（默认）：
   TTL 加随机抖动：baseTTL + random(0, baseTTL * 0.2)
 
 防缓存击穿（热 key）：
-  使用分布式锁（singleflight 或 Redis SET NX），只允许一个请求回源
+  进程内：singleflight — 同一进程内多个 goroutine 请求同一 key，仅一个回源
+  跨实例：Redis SET NX 分布式锁 — 多实例中仅一个获得锁回源
+  两者组合：singleflight 减少本进程发起的锁竞争，分布式锁解决跨实例问题
 ```
 
 ---
@@ -808,14 +1031,14 @@ return 0
 ### 9.3 Go 实现要点
 
 ```go
-// Lua 脚本通过 go:embed 嵌入
+// Lua 脚本通过 go:embed 嵌入，编译进二进制
 //go:embed stock-deduct.lua
 var stockDeductScript string
 
-// 服务启动时加载脚本
+// 服务启动时加载脚本到 Redis（获取 SHA）
 sha, err := rdb.ScriptLoad(ctx, stockDeductScript).Result()
 
-// 调用时使用 EVALSHA
+// 调用时使用 EVALSHA（省带宽）
 result, err := rdb.EvalSha(ctx, sha, []string{"stock:" + skuID}, quantity).Int()
 switch result {
 case 1:  // 成功
@@ -885,7 +1108,7 @@ Redis Hash: cart:{userId}
 
 ```
 1. HGETALL cart:{userId}
-2. 批量查询 SKU 最新信息（内部接口）
+2. 批量查询 SKU 最新信息（内部接口 / 直接调用）
 3. 对比快照，标记变化
 4. 返回合并后的购物车列表
 ```
@@ -894,10 +1117,42 @@ Redis Hash: cart:{userId}
 
 ## 11. 服务间通信
 
-### 11.1 HTTP 内部调用
+### 11.1 双模式服务间调用
 
 ```go
-// 使用 internal/httpclient 封装
+// ── 接口定义（消费方定义）──
+// order 包中
+type ProductQuerier interface {
+    BatchGetSKUs(ctx context.Context, skuIDs []string) ([]SKUInfo, error)
+    ReserveStock(ctx context.Context, items []StockItem, orderID string) error
+}
+
+// ── 微服务模式：HTTP 调用 ──
+type httpProductClient struct {
+    client *httpclient.InternalClient
+}
+
+func (c *httpProductClient) BatchGetSKUs(ctx context.Context, skuIDs []string) ([]SKUInfo, error) {
+    var result []SKUInfo
+    err := c.client.Post(ctx, "/internal/product/sku/batch", map[string]any{"skuIds": skuIDs}, &result)
+    return result, err
+}
+
+// ── 单体模式：直接调用 ──
+type localProductClient struct {
+    skuRepo      product.SKURepository
+    stockService *product.StockService
+}
+
+func (c *localProductClient) BatchGetSKUs(ctx context.Context, skuIDs []string) ([]SKUInfo, error) {
+    return c.skuRepo.BatchGet(ctx, skuIDs)  // 直接数据库查询，无 HTTP
+}
+```
+
+### 11.2 HTTP 内部客户端
+
+```go
+// 仅微服务模式使用
 type InternalClient struct {
     httpClient *http.Client
     baseURL    string
@@ -911,11 +1166,12 @@ func (c *InternalClient) Post(ctx context.Context, path string, body interface{}
 }
 ```
 
-### 11.2 内部接口约定
+### 11.3 内部接口约定
 
 ```
 /internal/ 前缀，仅 Docker 内部网络可访问
 Gateway 配置 internal_only 中间件拦截外部请求
+单体模式下不需要 /internal/ 端点（直接函数调用）
 ```
 
 ---
@@ -929,6 +1185,7 @@ PostgreSQL 全文搜索：
   → ts_vector + GIN 索引
   → to_tsvector('simple', title || ' ' || coalesce(description, '') || ' ' || coalesce(brand, ''))
   → 搜索结果按 ts_rank 排序
+  → 动态条件使用 squirrel 构建（参数化查询防注入）
 
 缓存：搜索结果按 queryHash 缓存 3 分钟
 ```
@@ -936,8 +1193,9 @@ PostgreSQL 全文搜索：
 ### 12.2 多级缓存
 
 ```
-L1: Redis 缓存（热数据，TTL + 随机抖动）
-L2: PostgreSQL（冷数据，连接池限制并发）
+L1: singleflight（进程内去重，防单进程缓存击穿）
+L2: Redis 缓存（热数据，TTL + 随机抖动）
+L3: PostgreSQL（冷数据，连接池限制并发）
 写入后回写 Redis（Cache-Aside）
 ```
 
@@ -951,7 +1209,8 @@ config := pgxpool.Config{
     MaxConnIdleTime:   30 * time.Minute,
     HealthCheckPeriod: time.Minute,
 }
-// 5 个 service × 20 = 100 ≈ PG max_connections(200)
+// 微服务模式：5 个 service × 20 = 100 ≈ PG max_connections(200)
+// 单体模式：1 个进程共享连接池，MaxConns 可适当调高
 ```
 
 ---
@@ -965,7 +1224,7 @@ config := pgxpool.Config{
 | JWT 短期 Token + JTI | 15 min + refresh + 黑名单 | Phase 2 |
 | CORS 白名单 | middleware/cors.go | Phase 4 |
 | 限流 | Redis 滑动窗口 | Phase 4 |
-| SQL 注入防护 | sqlc 参数化查询 | Phase 3 |
+| SQL 注入防护 | sqlc 参数化 + squirrel 参数化 | Phase 3 |
 | XSS 防护 | response JSON-only | Phase 2 |
 | 环境变量隔离 | .env 不入仓库 | Phase 0 |
 | 请求追踪 | traceId 全链路 | Phase 2 |
@@ -976,7 +1235,71 @@ config := pgxpool.Config{
 
 ---
 
-## 14. 分阶段开发路线图
+## 14. 项目结构
+
+```
+go-backend/
+├── CLAUDE.md
+├── Makefile
+├── go.mod / go.sum
+├── .env.example
+├── .gitignore
+├── .golangci.yml
+├── docker-compose.yml
+├── Dockerfile
+│
+├── cmd/
+│   ├── monolith/main.go               # 单体模式入口（本地开发）
+│   ├── gateway/main.go                # :3000（微服务模式）
+│   ├── user/main.go                   # :3001
+│   ├── product/main.go                # :3002
+│   ├── cart/main.go                   # :3003
+│   ├── order/main.go                  # :3004
+│   └── migrate/main.go               # 迁移工具
+│
+├── internal/
+│   ├── config/                        # koanf 配置（每个服务独立 Config struct）
+│   ├── apperr/                        # AppError + 错误码
+│   ├── response/                      # Success/Error/Paginated JSON + HandleError
+│   ├── handler/                       # AppHandler 类型 + Wrap 包装器
+│   ├── middleware/                    # 共享中间件
+│   ├── auth/                          # JWT + Argon2 + SHA256
+│   ├── id/                            # nanoid 生成
+│   ├── httpclient/                    # 内部服务 HTTP 客户端（微服务模式用）
+│   ├── database/
+│   │   ├── postgres.go                # pgxpool 连接
+│   │   ├── redis.go                   # go-redis 客户端
+│   │   ├── migrations/*.sql           # goose 迁移文件
+│   │   ├── queries/*.sql              # sqlc 查询文件（固定 CRUD）
+│   │   ├── sqlc.yaml
+│   │   └── gen/                       # sqlc 生成代码（勿手动修改）
+│   ├── lua/                           # Redis Lua 脚本 (go:embed 嵌入)
+│   │
+│   ├── gateway/                       # API Gateway 服务
+│   ├── user/                          # 用户服务
+│   │   ├── handler/ / service/ / repository/ / dto/
+│   ├── product/                       # 商品服务
+│   │   ├── handler/ / service/ / repository/ / dto/
+│   ├── cart/                          # 购物车服务
+│   │   ├── handler/ / service/ / dto/
+│   └── order/                         # 订单服务
+│       ├── handler/ / service/ / repository/ / statemachine/ / dto/
+│
+├── infra/
+│   ├── caddy/Caddyfile
+│   ├── postgres/
+│   │   ├── init.sql
+│   │   └── postgresql.conf
+│   └── redis/redis.conf
+├── scripts/
+└── docs/
+    ├── architecture.md
+    └── api-reference.md
+```
+
+---
+
+## 15. 分阶段开发路线图
 
 > **每个阶段 = 一个独立的 Claude Code CLI 会话**
 > 阶段间通过文件传递上下文，不依赖对话历史
@@ -985,7 +1308,7 @@ config := pgxpool.Config{
 
 ### Phase 0: 项目骨架 + 工具链
 
-**目标：** `go build ./...` 成功，5 个 health 端点响应
+**目标：** `go build ./...` 成功，6 个 health 端点响应（含 monolith）
 
 **Claude Code 提示词：**
 ```
@@ -993,21 +1316,25 @@ config := pgxpool.Config{
 搭建 Go 项目骨架：
 1. go mod init, 创建全部目录结构
 2. 每个服务最小 main.go（chi 路由 + /health POST 端点）
-3. Makefile (build/test/lint/run/generate/migrate)
-4. .gitignore, .env.example, .golangci.yml, CLAUDE.md
+3. cmd/monolith/main.go — 单体模式入口（挂载所有服务路由到 :3000）
+4. internal/handler/wrap.go — AppHandler 类型 + Wrap 包装器
+5. Makefile (build/test/lint/run/dev/generate/migrate)
+6. .gitignore, .env.example, .golangci.yml, CLAUDE.md
 不写任何业务代码。
 ```
 
 **产出物：**
 - `go.mod` / `go.sum`
-- `cmd/*/main.go` — 每个服务的入口（含 /health）
+- `cmd/*/main.go` — 每个服务的入口（含 /health）+ monolith
+- `internal/handler/wrap.go`
 - `Makefile`
 - `.gitignore`, `.env.example`, `.golangci.yml`
 
 **验收标准：**
 - [ ] `go build ./...` 无错误
-- [ ] 5 个服务 /health 端点响应 200
-- [ ] `make build` 生成 5 个二进制
+- [ ] 6 个服务 /health 端点响应 200（含 monolith）
+- [ ] `make build-all` 生成 7 个二进制（含 monolith）
+- [ ] `make dev` 启动单体模式
 
 **预估：** 1 个会话
 
@@ -1023,7 +1350,7 @@ config := pgxpool.Config{
 创建 Docker 基础设施：
 1. docker-compose.yml (PG 16 + Redis 7 + Caddy 2 + 5 个 Go 服务)
 2. infra/ 配置文件（init.sql 创建 3 个 PG schema）
-3. 多阶段 Dockerfile（Go 编译 + Alpine 运行）
+3. 多阶段 Dockerfile（Go 编译 + Alpine 运行，Lua 用 go:embed 不需要 COPY）
 4. infra/postgres/postgresql.conf 调优
 5. infra/redis/redis.conf 调优
 6. infra/caddy/Caddyfile 反向代理
@@ -1047,12 +1374,13 @@ config := pgxpool.Config{
 ```
 请参考 CLAUDE.md 和 docs/architecture.md Phase 2。
 实现 internal/ 共享包：
-1. config/ — koanf 配置加载 + struct tag 校验
+1. config/ — koanf 配置加载 + 每个服务独立 Config struct
 2. apperr/ — AppError struct + 工厂函数 + 错误码常量
-3. response/ — Success[T] / Error / Paginated[T] 构建器
-4. auth/ — JWT 签发/验证 + Argon2id + SHA256
-5. id/ — GenerateID (nanoid 21) + GenerateOrderNo
-6. httpclient/ — 内部服务 HTTP 客户端（注入 traceId）
+3. response/ — Success[T] / Error / Paginated[T] 构建器 + HandleError
+4. handler/ — AppHandler 类型 + Wrap 包装器（Phase 0 骨架基础上完善）
+5. auth/ — JWT 签发/验证 + Argon2id + SHA256
+6. id/ — GenerateID (nanoid 21) + GenerateOrderNo
+7. httpclient/ — 内部服务 HTTP 客户端（注入 traceId）
 每个包写表驱动测试。
 ```
 
@@ -1061,6 +1389,7 @@ config := pgxpool.Config{
 - [ ] 单元测试全绿
 - [ ] apperr.NewNotFound("user", "xxx") 返回 404 + USER_1001
 - [ ] JWT 签发/验证/黑名单流程正确
+- [ ] Handler Wrap 正确捕获 AppError 和 unknown error
 
 **预估：** 1-2 个会话
 
@@ -1072,12 +1401,12 @@ config := pgxpool.Config{
 
 **Claude Code 提示词：**
 ```
-请参考 CLAUDE.md 和 docs/architecture.md Phase 3 + 数据库设计（4.3-4.5）+ 索引策略（4.6）。
+请参考 CLAUDE.md 和 docs/architecture.md Phase 3 + 数据库设计（4.3-4.6）+ 查询策略（4.3）。
 实现数据库层：
 1. database/postgres.go — pgxpool 连接池 + 健康检查
 2. database/redis.go — go-redis 客户端
 3. 6 个 goose 迁移文件（翻译自 TS 版 Drizzle schema）
-4. sqlc 查询文件（所有表的 CRUD）
+4. sqlc 查询文件（固定 CRUD）+ squirrel 示例（动态查询）
 5. lua/ — 4 个 Lua 脚本 + go:embed 封装
 6. cmd/migrate/main.go — 迁移工具
 7. database/sqlc.yaml 配置
@@ -1087,6 +1416,7 @@ config := pgxpool.Config{
 - [ ] goose 迁移成功创建所有表和索引
 - [ ] sqlc generate 生成类型安全 Go 代码
 - [ ] Lua 脚本通过 go:embed 加载 + EVALSHA 可调用
+- [ ] squirrel 动态查询编译通过
 
 **预估：** 1-2 个会话
 
@@ -1099,12 +1429,13 @@ config := pgxpool.Config{
 **产出物：**
 - `middleware/requestid.go` — nanoid traceId + context 注入
 - `middleware/logger.go` — slog 结构化日志（method, path, status, duration）
-- `middleware/recovery.go` — panic → 500 响应
 - `middleware/cors.go` — 可配置白名单
 - `middleware/auth.go` — JWT 验证 + Redis 黑名单 + context 注入 userId
 - `middleware/ratelimit.go` — Redis ZSET 滑动窗口
 - `middleware/idempotent.go` — X-Idempotency-Key 检查
 - `middleware/internal_only.go` — 拦截外部 /internal/* 请求
+
+注：不需要 recovery 中间件 — Handler Wrap 模式已处理所有错误。
 
 **验收标准：**
 - [ ] 表驱动测试全绿
@@ -1126,7 +1457,7 @@ config := pgxpool.Config{
 
 **验收标准：**
 - [ ] 网关正确代理请求到下游服务
-- [ ] 中间件链生效（requestid → logger → recovery → cors → ratelimit → auth → idempotent）
+- [ ] 中间件链生效（requestid → logger → cors → ratelimit → auth → idempotent）
 - [ ] 公开路由白名单正确
 - [ ] /internal/ 外部不可达
 
@@ -1142,7 +1473,7 @@ config := pgxpool.Config{
 - `internal/user/dto/` — RegisterInput, LoginInput, RefreshInput 等
 - `internal/user/repository/` — user, address, token 仓储（接口 + sqlc 实现）
 - `internal/user/service/` — auth, user, address 业务逻辑
-- `internal/user/handler/` — HTTP handler（参数校验 + 调用 service）
+- `internal/user/handler/` — HTTP handler（使用 Wrap 包装器）
 - `cmd/user/main.go` — 组装依赖 + 路由挂载 + 优雅关停
 
 **验收标准：**
@@ -1163,6 +1494,8 @@ config := pgxpool.Config{
 **产出物：**
 - Category handler/service/repository — 树形 CRUD
 - Product handler/service/repository — 列表/详情/搜索/CRUD
+  - 搜索使用 squirrel 动态构建
+  - 详情使用 singleflight 防缓存击穿
 - SKU 管理
 - Stock Service — Reserve/Release/Confirm（Lua 脚本）
 - Cache Service — Redis 缓存 + 防穿透/雪崩/击穿
@@ -1171,9 +1504,9 @@ config := pgxpool.Config{
 
 **验收标准：**
 - [ ] 商品 CRUD 全流程
-- [ ] 全文搜索正确
+- [ ] 全文搜索正确（squirrel 动态条件）
 - [ ] 库存并发扣减无超卖
-- [ ] 缓存策略生效
+- [ ] 缓存策略生效（singleflight + Redis）
 
 **预估：** 2-3 个会话
 
@@ -1185,7 +1518,7 @@ config := pgxpool.Config{
 
 **产出物：**
 - 全 Redis 实现（HASH cart:{userId}）
-- Add/List/Update/Remove/Clear/Select handler
+- Add/List/Update/Remove/Clear/Select handler（使用 Wrap 包装器）
 - CheckoutPreview（服务端重算价格）
 - Internal ClearItems
 
@@ -1204,7 +1537,7 @@ config := pgxpool.Config{
 
 **产出物：**
 - 状态机（statemachine 包）
-- Order Service — 9 步创建编排
+- Order Service — 9 步创建编排（通过接口调用其他服务）
 - Payment Service — 创建/回调/查询
 - Timeout Service — goroutine + time.Ticker
 
@@ -1214,6 +1547,7 @@ config := pgxpool.Config{
 - [ ] 支付回调幂等
 - [ ] 超时自动取消 + 库存释放
 - [ ] 并发下单无超卖
+- [ ] 单体模式和微服务模式均可运行
 
 **预估：** 2-3 个会话
 
@@ -1243,8 +1577,8 @@ config := pgxpool.Config{
 **目标：** 全面测试 + 性能优化
 
 **产出物：**
-- 端到端集成测试
-- 并发压力测试
+- 端到端集成测试（testcontainers 自动启停 PG/Redis）
+- 并发压力测试（库存扣减竞争）
 - Benchmark（`go test -bench`）
 - pprof 集成
 - SQL 查询优化
@@ -1254,6 +1588,7 @@ config := pgxpool.Config{
 - [ ] >80% 覆盖率
 - [ ] 基准测试记录
 - [ ] 无数据竞争（`-race` 通过）
+- [ ] testcontainers 集成测试全绿
 
 **预估：** 1-2 个会话
 

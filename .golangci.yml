@@ -30,7 +30,7 @@ linters-settings:
     excludes:
       - G104  # unhandled errors — covered by errcheck
   goimports:
-    local-prefixes: my-backend-go
+    local-prefixes: go-backend
 
 issues:
   exclude-rules:

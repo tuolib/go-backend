@@ -1,5 +1,6 @@
 # Multi-stage Dockerfile for Go services
 # Usage: docker build --build-arg SERVICE=gateway .
+# Lua scripts are embedded via go:embed — no runtime file copy needed.
 
 # ── Stage 1: Build ──
 FROM golang:1.22-alpine AS builder
@@ -28,9 +29,6 @@ RUN apk add --no-cache ca-certificates wget tzdata
 WORKDIR /app
 
 COPY --from=builder /app/server .
-
-# Copy Lua scripts (needed at runtime for Redis EVAL)
-COPY --from=builder /app/internal/lua/*.lua ./internal/lua/
 
 EXPOSE 3000 3001 3002 3003 3004
 

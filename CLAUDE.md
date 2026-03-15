@@ -16,8 +16,8 @@
 |------|------|------|
 | 语言 | Go 1.22+ | 高性能、强类型、原生并发 |
 | 路由 | chi v5 | 基于 stdlib net/http，Go 惯用中间件模式 |
-| DB 驱动 | pgx v5 + pgxpool | Go 生态最佳 PG 驱动，连接池、LISTEN/COPY |
-| 查询生成 | sqlc | SQL 编译生成类型安全 Go 代码，SQL-first |
+| DB 驱动 | pgx v5 + pgxpool | Go 生态最佳 PG 驱动，连接池 |
+| 查询生成 | sqlc + squirrel | sqlc 处理固定 CRUD；squirrel 处理动态筛选/搜索 |
 | 迁移 | goose | SQL 迁移文件，支持 up/down |
 | Redis | go-redis v9 | Lua/Pipeline/Sentinel，context.Context |
 | 校验 | validator v10 | struct tag 校验 `validate:"required,email"` |
@@ -26,14 +26,33 @@
 | JWT | golang-jwt v5 | HS256 双令牌（access + refresh） |
 | 密码 | alexedwards/argon2id | Argon2id 哈希 |
 | ID | go-nanoid v2 | 21 字符唯一 ID |
-| 测试 | testing + testify | 表驱动测试 + 断言 |
+| 并发控制 | x/sync/singleflight | 进程内缓存击穿防护 |
+| 测试 | testing + testify + testcontainers-go | 表驱动测试 + 断言 + 自动启停 PG/Redis |
 | 反向代理 | Caddy | 自动 HTTPS、反向代理、负载均衡 |
 | 容器化 | Docker + Compose | 本地开发 & 生产部署统一 |
+
+## 双模式运行
+
+本项目支持**单体模式**和**微服务模式**双模式运行：
+
+```
+cmd/
+├── monolith/main.go       # 单体模式：所有服务跑在一个进程，内部调用零网络开销
+├── gateway/main.go        # 微服务模式：API Gateway
+├── user/main.go           # 微服务模式：用户服务
+├── product/main.go        # 微服务模式：商品服务
+├── cart/main.go           # 微服务模式：购物车服务
+├── order/main.go          # 微服务模式：订单服务
+└── migrate/main.go        # 迁移工具
+```
+
+- **本地开发**：`go run ./cmd/monolith` 一个进程搞定
+- **生产部署**：每个服务独立编译、独立扩缩容
 
 ## 项目结构
 
 ```
-my-backend-go/
+go-backend/
 ├── CLAUDE.md
 ├── Makefile
 ├── go.mod / go.sum
@@ -44,6 +63,7 @@ my-backend-go/
 ├── Dockerfile
 │
 ├── cmd/                               # 每个服务一个入口
+│   ├── monolith/main.go               # 单体模式入口
 │   ├── gateway/main.go                # :3000
 │   ├── user/main.go                   # :3001
 │   ├── product/main.go                # :3002
@@ -52,17 +72,23 @@ my-backend-go/
 │   └── migrate/main.go               # 迁移工具
 │
 ├── internal/
-│   ├── config/                        # koanf 配置加载
-│   │   └── config.go
+│   ├── config/                        # koanf 配置加载（每个服务独立 Config struct）
+│   │   ├── config.go                  # 公共字段
+│   │   ├── gateway.go                 # GatewayConfig
+│   │   ├── user.go                    # UserServiceConfig
+│   │   ├── product.go                 # ProductServiceConfig
+│   │   ├── cart.go                    # CartServiceConfig
+│   │   └── order.go                   # OrderServiceConfig
 │   ├── apperr/                        # AppError + 错误码
-│   │   ├── errors.go                  # AppError struct + 工厂函数
-│   │   └── codes.go                   # 业务错误码常量
-│   ├── response/                      # Success/Error/Paginated JSON
+│   │   ├── errors.go
+│   │   └── codes.go
+│   ├── response/                      # Success/Error/Paginated JSON + HandleError
 │   │   └── response.go
+│   ├── handler/                       # AppHandler 类型 + Wrap 包装器
+│   │   └── wrap.go
 │   ├── middleware/                     # 共享中间件
 │   │   ├── requestid.go
 │   │   ├── logger.go
-│   │   ├── recovery.go
 │   │   ├── cors.go
 │   │   ├── auth.go
 │   │   ├── ratelimit.go
@@ -74,13 +100,13 @@ my-backend-go/
 │   │   └── hash.go
 │   ├── id/                            # nanoid 生成
 │   │   └── id.go
-│   ├── httpclient/                    # 内部服务 HTTP 客户端
+│   ├── httpclient/                    # 内部服务 HTTP 客户端（微服务模式用）
 │   │   └── client.go
 │   ├── database/
 │   │   ├── postgres.go                # pgxpool 连接
 │   │   ├── redis.go                   # go-redis 客户端
 │   │   ├── migrations/*.sql           # goose 迁移文件
-│   │   ├── queries/*.sql              # sqlc 查询文件
+│   │   ├── queries/*.sql              # sqlc 查询文件（固定 CRUD）
 │   │   ├── sqlc.yaml
 │   │   └── gen/                       # sqlc 生成代码（勿手动修改）
 │   ├── lua/                           # Redis Lua 脚本 (go:embed)
@@ -127,14 +153,12 @@ my-backend-go/
 │       └── dto/
 │
 ├── infra/                             # 基础设施配置
-│   ├── caddy/
-│   │   └── Caddyfile
+│   ├── caddy/Caddyfile
 │   ├── postgres/
 │   │   ├── init.sql
 │   │   └── postgresql.conf
-│   └── redis/
-│       └── redis.conf
-├── scripts/                           # 运维脚本
+│   └── redis/redis.conf
+├── scripts/
 └── docs/
     ├── architecture.md
     └── api-reference.md
@@ -149,15 +173,13 @@ my-backend-go/
 - 类型/接口：`PascalCase`（例：`CreateOrderInput`、`UserRepository`）
 - 函数/方法：`PascalCase`（导出）或 `camelCase`（未导出）
 - 常量：`PascalCase`（导出）或 `camelCase`（未导出）
-- 错误码常量：`PascalCase` 前缀（例：`ErrCodeStockInsufficient`）
+- 错误码常量：`ErrCode` 前缀（例：`ErrCodeStockInsufficient`）
 - 数据库表名：`snake_case`（例：`order_items`）
 - 数据库列名：`snake_case`（例：`created_at`）
 - Redis Key：`{service}:{resource}:{id}`（例：`stock:sku123`）
 - JSON tag：`camelCase`（与 TS 版 API 契约一致）
 
 ### 包组织
-
-遵循 Go 标准项目布局：
 
 ```
 cmd/        — 入口点（main 包）
@@ -184,9 +206,7 @@ func NewUserService(repo UserRepository, cache *redis.Client, hasher *auth.Argon
 var db *pgxpool.Pool
 ```
 
-### 接口定义
-
-接口由使用方定义，不由实现方定义（Go 惯例）：
+### 接口定义 — 由使用方定义
 
 ```go
 // ✅ 在 service 包中定义 repository 接口
@@ -194,8 +214,54 @@ type UserRepository interface {
     FindByEmail(ctx context.Context, email string) (*User, error)
     Create(ctx context.Context, user *User) error
 }
+```
 
-// ❌ 不要在 repository 包中定义接口
+### 服务间调用 — 接口抽象
+
+服务间依赖通过接口定义，支持双模式运行：
+
+```go
+// order 包内定义依赖接口
+type ProductQuerier interface {
+    BatchGetSKUs(ctx context.Context, skuIDs []string) ([]SKUInfo, error)
+    ReserveStock(ctx context.Context, items []StockItem, orderID string) error
+}
+
+// 微服务模式：HTTP 实现
+type httpProductClient struct { ... }
+
+// 单体模式：直接调用
+type localProductClient struct { service *product.StockService }
+```
+
+### Handler 模式 — 返回 error
+
+Handler 使用返回 error 的签名 + Wrap 包装器统一处理错误：
+
+```go
+// internal/handler/wrap.go
+type AppHandler func(w http.ResponseWriter, r *http.Request) error
+
+func Wrap(h AppHandler) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        if err := h(w, r); err != nil {
+            response.HandleError(w, r, err)
+        }
+    }
+}
+
+// handler 写法 — 干净的 error 流
+func (h *UserHandler) Profile(w http.ResponseWriter, r *http.Request) error {
+    userID := middleware.UserIDFrom(r.Context())
+    user, err := h.service.GetProfile(r.Context(), userID)
+    if err != nil {
+        return err  // 直接返回，Wrap 处理
+    }
+    return response.Success(w, r, user)
+}
+
+// 路由注册
+r.Post("/api/v1/user/profile", handler.Wrap(h.Profile))
 ```
 
 ### 错误处理
@@ -203,36 +269,22 @@ type UserRepository interface {
 - 使用 `error` 接口逐层返回，不用 panic
 - 业务错误使用 `apperr.AppError`
 - 使用 `errors.Is` / `errors.As` 判断错误类型
-- 工厂函数创建特定错误：`apperr.NewNotFound("user", userId)`
+- Wrap 包装器自动将 AppError 转为 HTTP 响应，未知错误转为 500
 
 ```go
 // ✅ 正确
-func (s *UserService) FindByEmail(ctx context.Context, email string) (*User, error) {
-    user, err := s.repo.FindByEmail(ctx, email)
-    if err != nil {
-        return nil, fmt.Errorf("find user by email: %w", err)
-    }
-    if user == nil {
-        return nil, apperr.NewNotFound("user", email)
-    }
-    return user, nil
+if user == nil {
+    return apperr.NewNotFound("user", email)
 }
 
 // ❌ 错误 — 不要 panic
-func (s *UserService) FindByEmail(ctx context.Context, email string) *User {
-    user, err := s.repo.FindByEmail(ctx, email)
-    if err != nil {
-        panic(err) // NEVER
-    }
-    return user
-}
+panic("user not found")
 ```
 
 ### Context 使用
 
 - 所有函数第一个参数为 `context.Context`
 - 通过 context 传递 traceId、userId 等请求级数据
-- 使用 `context.WithTimeout` 控制超时
 
 ```go
 type contextKey string
@@ -245,7 +297,7 @@ const (
 
 ### 中间件模式
 
-使用 chi 标准中间件签名：
+chi 标准签名：
 
 ```go
 func RequestID(next http.Handler) http.Handler {
@@ -270,7 +322,6 @@ func RequestID(next http.Handler) http.Handler {
 所有 API 统一返回（与 TS 版 JSON 格式完全一致）：
 
 ```go
-// 成功
 type SuccessResponse[T any] struct {
     Code    int    `json:"code"`
     Success bool   `json:"success"`
@@ -279,7 +330,6 @@ type SuccessResponse[T any] struct {
     TraceID string `json:"traceId"`
 }
 
-// 失败
 type ErrorResponse struct {
     Code    int         `json:"code"`
     Success bool        `json:"success"`
@@ -288,72 +338,62 @@ type ErrorResponse struct {
     Meta    *ErrorMeta  `json:"meta,omitempty"`
     TraceID string      `json:"traceId"`
 }
+```
 
-type ErrorMeta struct {
-    Code    string      `json:"code"`
-    Message string      `json:"message"`
-    Details interface{} `json:"details,omitempty"`
+### 数据库查询策略
+
+双工具策略：
+
+```go
+// 固定 CRUD → sqlc（编译时类型安全）
+// internal/database/queries/users.sql
+// -- name: GetUserByEmail :one
+// SELECT * FROM user_service.users WHERE email = $1 AND deleted_at IS NULL;
+
+// 动态筛选/搜索 → squirrel（运行时构建）
+qb := sq.Select("id", "title", "min_price").
+    From("product_service.products").
+    Where("status = 'active'")
+if input.CategoryID != "" {
+    qb = qb.Where("id IN (SELECT product_id FROM product_service.product_categories WHERE category_id = ?)", input.CategoryID)
+}
+```
+
+### 缓存击穿防护
+
+进程内用 singleflight，跨实例用 Redis 分布式锁：
+
+```go
+var group singleflight.Group
+
+func (s *ProductService) GetDetail(ctx context.Context, id string) (*Product, error) {
+    v, err, _ := group.Do("product:"+id, func() (interface{}, error) {
+        return s.repo.FindByID(ctx, id)
+    })
+    return v.(*Product), err
 }
 ```
 
 ### 环境变量
 
-- 所有环境变量通过 `internal/config` 的 koanf 模块加载
-- 使用 struct tag 校验必填项
-- 启动时校验失败直接 fatal
+- 通过 `internal/config` 的 koanf 模块加载
+- 每个服务有独立的 Config struct，只加载自己需要的变量
 - 禁止在业务代码中直接 `os.Getenv()`
-
-### 数据库
-
-- 使用 sqlc 从 SQL 生成类型安全的 Go 代码
-- 迁移文件放在 `internal/database/migrations/`
-- 查询文件放在 `internal/database/queries/`
-- 所有表使用 PG schema 隔离（`user_service.users` 等）
-- 所有表必须有 `id`、`created_at`、`updated_at` 字段
-- `id` 使用 nanoid（21位）
-- 时间字段统一 `timestamp with time zone`
-- 软删除使用 `deleted_at` 字段
-- 并发安全的表使用 `version` 字段（乐观锁）
 
 ### 库存操作
 
-- 预扣/释放：通过 Redis Lua 脚本原子操作（`go:embed` 加载）
-- 确认：通过 PG 乐观锁（`WHERE version = $currentVersion`）
+- 预扣/释放：Redis Lua 脚本原子操作（`go:embed` 嵌入，编译进二进制）
+- 确认：PG 乐观锁
 - 所有操作记录到 `stock_operations` 表
 - 禁止直接 `UPDATE skus SET stock = $value`
 
-### 幂等设计
-
-- 订单创建、支付发起必须携带 `X-Idempotency-Key` header
-- Gateway 层和 Service 层双重检查
-- 幂等键存储在 Redis，TTL 24h
-
 ### 并发模式
 
-使用 Go 原生并发原语：
-
 ```go
-// errgroup 并发调用多个服务
 g, ctx := errgroup.WithContext(ctx)
-
-var skus []*SKU
-var address *Address
-
-g.Go(func() error {
-    var err error
-    skus, err = productClient.BatchGetSKUs(ctx, skuIDs)
-    return err
-})
-
-g.Go(func() error {
-    var err error
-    address, err = userClient.GetAddress(ctx, addressID, userID)
-    return err
-})
-
-if err := g.Wait(); err != nil {
-    return nil, err
-}
+g.Go(func() error { skus, err = productClient.BatchGetSKUs(ctx, skuIDs); return err })
+g.Go(func() error { address, err = userClient.GetAddress(ctx, addressID, userID); return err })
+if err := g.Wait(); err != nil { return nil, err }
 ```
 
 ### 优雅关停
@@ -361,72 +401,36 @@ if err := g.Wait(); err != nil {
 ```go
 ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 defer stop()
-
-srv := &http.Server{Addr: ":3001", Handler: router}
-
-go func() {
-    if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-        slog.Error("server error", "err", err)
-    }
-}()
-
+// ... start server ...
 <-ctx.Done()
-slog.Info("shutting down...")
-
-shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-defer cancel()
-srv.Shutdown(shutdownCtx)
+srv.Shutdown(timeoutCtx)
 ```
 
 ### 测试
 
-- 测试框架：`testing` + `testify/assert`
+- 测试框架：`testing` + `testify/assert` + `testcontainers-go`
 - 测试文件：与源码同目录，命名 `*_test.go`
-- 使用表驱动测试（Table-Driven Tests）
-- 集成测试使用 build tag：`//go:build integration`
-- 并发测试使用 `sync.WaitGroup` + `testing.T.Parallel()`
-
-```go
-func TestFindUserByEmail(t *testing.T) {
-    tests := []struct {
-        name    string
-        email   string
-        want    *User
-        wantErr error
-    }{
-        {"found", "alice@example.com", &User{Email: "alice@example.com"}, nil},
-        {"not found", "unknown@example.com", nil, apperr.ErrNotFound},
-    }
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            got, err := svc.FindByEmail(ctx, tt.email)
-            if tt.wantErr != nil {
-                assert.ErrorIs(t, err, tt.wantErr)
-            } else {
-                assert.NoError(t, err)
-                assert.Equal(t, tt.want.Email, got.Email)
-            }
-        })
-    }
-}
-```
+- 表驱动测试（Table-Driven Tests）
+- 集成测试用 testcontainers 自动启停 PG/Redis，不依赖外部实例
+- 并发测试：`sync.WaitGroup` + `-race` flag
+- 集成测试 build tag：`//go:build integration`
 
 ### 中间件顺序
 
-API Gateway 的中间件链按以下顺序挂载：
+API Gateway 中间件链：
 
 ```
-requestid → logger → recovery → cors → ratelimit → auth → idempotent
+requestid → logger → cors → ratelimit → auth → idempotent
 ```
 
-错误由 recovery 中间件兜底捕获（panic → 500），业务错误由 handler 层处理。
+错误由 Wrap 包装器处理（handler 返回 error → 自动转 JSON 响应）。
 
 ## Claude Code 协作规则
 
 ### 分阶段开发
 
-本项目按 `docs/architecture.md` 中定义的 Phase 0-11 路线图开发。
-每个阶段使用**独立的 Claude Code 会话**，避免长对话上下文退化。
+按 `docs/architecture.md` 中定义的 Phase 0-11 路线图开发。
+每个阶段使用**独立的 Claude Code 会话**。
 
 ### 每个会话的开始
 
@@ -437,21 +441,14 @@ requestid → logger → recovery → cors → ratelimit → auth → idempotent
 
 ### 接口文档同步
 
-每当新增或修改 API 路由后，必须同步更新 `docs/api-reference.md` 中对应的接口文档。
+新增或修改 API 路由后，必须同步更新 `docs/api-reference.md`。
 
 ### 代码生成要求
 
 - 先写类型定义（struct + interface），再写实现
 - 先写测试骨架，再写业务逻辑
-- 每个文件头部注释说明用途
 - 关键设计决策写在代码注释中
 - 库存/支付等关键路径必须有并发安全注释
-
-### SQL 文件约定
-
-- 迁移文件：`internal/database/migrations/YYYYMMDDHHMMSS_description.sql`
-- 查询文件按域拆分：`queries/users.sql`、`queries/products.sql` 等
-- sqlc 生成代码放在 `internal/database/gen/`，不要手动修改
 
 ### 禁止事项
 
@@ -463,4 +460,4 @@ requestid → logger → recovery → cors → ratelimit → auth → idempotent
 - 不要信任前端传来的金额（服务端必须重新计算）
 - 不要使用 `init()` 函数做副作用初始化
 - 不要使用全局可变状态
-- 不要忽略 error 返回值（`_ = someFunc()` 仅限确实不需要处理的场景）
+- 不要忽略 error 返回值

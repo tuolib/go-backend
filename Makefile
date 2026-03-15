@@ -1,4 +1,4 @@
-.PHONY: build build-all test lint run-gateway run-user run-product run-cart run-order \
+.PHONY: build build-all build-monolith test lint dev run-gateway run-user run-product run-cart run-order \
        migrate-up migrate-down migrate-create sqlc docker-up docker-down docker-build \
        docker-logs health smoke stress seed generate tidy
 
@@ -8,7 +8,7 @@ GOFLAGS := -v
 BINARY_DIR := bin
 
 # ── Build ──
-build-all: build-gateway build-user build-product build-cart build-order build-migrate
+build-all: build-gateway build-user build-product build-cart build-order build-migrate build-monolith
 
 build-gateway:
 	$(GO) build $(GOFLAGS) -o $(BINARY_DIR)/gateway ./cmd/gateway
@@ -28,10 +28,16 @@ build-order:
 build-migrate:
 	$(GO) build $(GOFLAGS) -o $(BINARY_DIR)/migrate ./cmd/migrate
 
+build-monolith:
+	$(GO) build $(GOFLAGS) -o $(BINARY_DIR)/monolith ./cmd/monolith
+
 build:
 	$(GO) build ./...
 
 # ── Run (local dev) ──
+dev:
+	$(GO) run ./cmd/monolith
+
 run-gateway:
 	$(GO) run ./cmd/gateway
 
