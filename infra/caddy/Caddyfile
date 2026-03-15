@@ -1,0 +1,23 @@
+{
+	# Replace with your domain; remove this block for local dev
+	# email admin@example.com
+}
+
+# Production: replace :80 with your domain, e.g. shop.example.com
+:80 {
+	reverse_proxy api-gateway:3000
+
+	encode gzip zstd
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

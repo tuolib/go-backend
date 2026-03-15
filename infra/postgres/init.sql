@@ -1,0 +1,4 @@
+-- Initialize PostgreSQL schemas for service isolation
+CREATE SCHEMA IF NOT EXISTS user_service;
+CREATE SCHEMA IF NOT EXISTS product_service;
+CREATE SCHEMA IF NOT EXISTS order_service;
