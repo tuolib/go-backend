@@ -52,11 +52,47 @@ func NewUnauthorized(message string) *AppError {
 	}
 }
 
+// NewForbidden creates a 403 forbidden error.
+func NewForbidden(message string) *AppError {
+	return &AppError{
+		Code:       ErrCodeForbidden,
+		StatusCode: http.StatusForbidden,
+		Message:    message,
+	}
+}
+
+// NewConflict creates a 409 conflict error.
+func NewConflict(resource, identifier string) *AppError {
+	return &AppError{
+		Code:       ErrCodeConflict,
+		StatusCode: http.StatusConflict,
+		Message:    fmt.Sprintf("%s already exists: %s", resource, identifier),
+	}
+}
+
+// NewValidation creates a 422 validation error.
+func NewValidation(message string) *AppError {
+	return &AppError{
+		Code:       ErrCodeValidation,
+		StatusCode: http.StatusUnprocessableEntity,
+		Message:    message,
+	}
+}
+
 // NewInternal creates a 500 internal server error.
 func NewInternal(message string) *AppError {
 	return &AppError{
 		Code:       ErrCodeInternal,
 		StatusCode: http.StatusInternalServerError,
 		Message:    message,
+	}
+}
+
+// NewRateLimited creates a 429 rate limit error.
+func NewRateLimited() *AppError {
+	return &AppError{
+		Code:       ErrCodeRateLimited,
+		StatusCode: http.StatusTooManyRequests,
+		Message:    "rate limit exceeded",
 	}
 }
