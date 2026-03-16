@@ -10,6 +10,8 @@ import (
 	"go-backend/internal/apperr"
 )
 
+// TestSuccess 测试成功响应的格式是否正确。
+// TestSuccess verifies the success response format is correct.
 func TestSuccess(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/test", nil)
@@ -23,6 +25,7 @@ func TestSuccess(t *testing.T) {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
 	}
 
+	// 反序列化响应体，检查各字段 / Deserialize response body and check each field
 	var resp SuccessResp
 	json.NewDecoder(w.Body).Decode(&resp)
 
@@ -37,12 +40,14 @@ func TestSuccess(t *testing.T) {
 	}
 }
 
+// TestPaginated 测试分页响应是否正确计算页码信息。
+// TestPaginated tests that paginated responses correctly calculate pagination info.
 func TestPaginated(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/test", nil)
 
 	items := []string{"a", "b", "c"}
-	err := Paginated(w, r, items, 30, 2, 10)
+	err := Paginated(w, r, items, 30, 2, 10) // 总 30 条，第 2 页，每页 10 条 / Total 30 items, page 2, 10 per page
 	if err != nil {
 		t.Fatalf("Paginated error: %v", err)
 	}
@@ -54,7 +59,8 @@ func TestPaginated(t *testing.T) {
 		t.Error("expected success = true")
 	}
 
-	// Check pagination in data
+	// resp.Data 是 any 类型，需要经过 JSON 重编码才能解析到具体结构体。
+	// resp.Data is type any — needs JSON re-encoding to parse into a concrete struct.
 	dataBytes, _ := json.Marshal(resp.Data)
 	var pg PaginatedData
 	json.Unmarshal(dataBytes, &pg)
@@ -70,6 +76,8 @@ func TestPaginated(t *testing.T) {
 	}
 }
 
+// TestHandleError_AppError 测试 HandleError 能正确处理 AppError 类型。
+// TestHandleError_AppError tests that HandleError correctly handles AppError types.
 func TestHandleError_AppError(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/test", nil)
@@ -95,10 +103,14 @@ func TestHandleError_AppError(t *testing.T) {
 	}
 }
 
+// TestHandleError_UnknownError 测试非 AppError 类型的错误被统一转为 500。
+// TestHandleError_UnknownError tests that non-AppError errors are uniformly converted to 500.
 func TestHandleError_UnknownError(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/test", nil)
 
+	// errors.New 创建一个普通的 error，不是 AppError。
+	// errors.New creates a plain error, not an AppError.
 	HandleError(w, r, errors.New("something went wrong"))
 
 	if w.Code != http.StatusInternalServerError {
@@ -108,20 +120,24 @@ func TestHandleError_UnknownError(t *testing.T) {
 	var resp ErrorResp
 	json.NewDecoder(w.Body).Decode(&resp)
 
+	// 普通错误的消息被替换为通用文本，防止泄露内部细节。
+	// Plain error messages are replaced with generic text to prevent leaking internal details.
 	if resp.Message != "internal server error" {
 		t.Errorf("message = %q, want %q", resp.Message, "internal server error")
 	}
 }
 
+// TestPaginated_TotalPagesRoundsUp 用表驱动测试验证向上取整的分页计算。
+// TestPaginated_TotalPagesRoundsUp uses table-driven tests to verify ceiling division for pagination.
 func TestPaginated_TotalPagesRoundsUp(t *testing.T) {
 	tests := []struct {
 		total, pageSize, want int
 	}{
-		{0, 10, 0},
-		{1, 10, 1},
-		{10, 10, 1},
-		{11, 10, 2},
-		{25, 10, 3},
+		{0, 10, 0},  // 0 条数据 → 0 页 / 0 items → 0 pages
+		{1, 10, 1},  // 1 条 → 1 页 / 1 item → 1 page
+		{10, 10, 1}, // 刚好整除 → 1 页 / Exact division → 1 page
+		{11, 10, 2}, // 多 1 条 → 向上取整为 2 页 / 1 extra → rounds up to 2 pages
+		{25, 10, 3}, // 25/10 = 2.5 → 向上取整为 3 页 / 25/10 = 2.5 → rounds up to 3 pages
 	}
 	for _, tt := range tests {
 		w := httptest.NewRecorder()

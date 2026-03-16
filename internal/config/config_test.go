@@ -5,9 +5,14 @@ import (
 	"testing"
 )
 
+// TestLoad 测试 koanf 能正确从环境变量加载配置。
+// TestLoad tests that koanf correctly loads configuration from environment variables.
 func TestLoad(t *testing.T) {
+	// 设置测试用的环境变量 / Set environment variables for testing
 	os.Setenv("DATABASE_URL", "postgresql://localhost/test")
 	os.Setenv("APP_ENV", "testing")
+	// defer 确保测试结束后清理环境变量，不影响其他测试。
+	// defer ensures environment variables are cleaned up after the test, so they don't affect other tests.
 	defer os.Unsetenv("DATABASE_URL")
 	defer os.Unsetenv("APP_ENV")
 
@@ -16,6 +21,7 @@ func TestLoad(t *testing.T) {
 		t.Fatalf("Load error: %v", err)
 	}
 
+	// 验证 Load 把 DATABASE_URL 转成了小写 database_url / Verify Load converted DATABASE_URL to lowercase database_url
 	if got := k.String("database_url"); got != "postgresql://localhost/test" {
 		t.Errorf("database_url = %q, want %q", got, "postgresql://localhost/test")
 	}
@@ -24,6 +30,8 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+// TestLoadUser 测试用户服务配置的完整加载流程。
+// TestLoadUser tests the complete loading flow for user service configuration.
 func TestLoadUser(t *testing.T) {
 	os.Setenv("USER_SERVICE_PORT", "4001")
 	os.Setenv("DATABASE_URL", "postgresql://localhost/test")
@@ -39,6 +47,7 @@ func TestLoadUser(t *testing.T) {
 	k, _ := Load()
 	cfg := LoadUser(k)
 
+	// 验证各字段正确映射 / Verify each field is correctly mapped
 	if cfg.Port != "4001" {
 		t.Errorf("Port = %q, want %q", cfg.Port, "4001")
 	}
@@ -53,6 +62,8 @@ func TestLoadUser(t *testing.T) {
 	}
 }
 
+// TestLoadUser_DefaultPort 测试未设置端口环境变量时使用默认值。
+// TestLoadUser_DefaultPort tests that the default port is used when the env var is unset.
 func TestLoadUser_DefaultPort(t *testing.T) {
 	os.Unsetenv("USER_SERVICE_PORT")
 
