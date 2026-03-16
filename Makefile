@@ -38,6 +38,11 @@ build:
 dev:
 	$(GO) run ./cmd/monolith
 
+# Air 热重载：监听文件变化自动重新编译+重启（需先 go install github.com/air-verse/air@latest）
+# Air hot-reload: watches file changes and auto-rebuilds+restarts (requires: go install github.com/air-verse/air@latest)
+dev-live:
+	air
+
 run-gateway:
 	$(GO) run ./cmd/gateway
 

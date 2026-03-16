@@ -1,0 +1,69 @@
+# .air.toml — Air 热重载配置
+# Air hot-reload configuration
+# 文档 / Docs: https://github.com/air-verse/air
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  # 编译命令：构建单体模式入口
+  # Build command: compile the monolith entry point
+  cmd = "go build -o ./tmp/monolith ./cmd/monolith"
+
+  # 编译产物路径（Air 会运行这个二进制）
+  # Binary path (Air will run this binary)
+  bin = "./tmp/monolith"
+
+  # 编译延迟：文件变化后等 500ms 再编译（防止保存多个文件时重复编译）
+  # Build delay: wait 500ms after file change before building (prevents multiple rebuilds when saving several files)
+  delay = 500
+
+  # 监听这些后缀的文件变化
+  # Watch files with these extensions
+  include_ext = ["go", "toml", "yaml", "yml"]
+
+  # 排除这些目录（不监听）
+  # Exclude these directories (don't watch)
+  exclude_dir = ["tmp", "bin", "vendor", "node_modules", ".git", "docs", "scripts", "infra"]
+
+  # 排除这些文件
+  # Exclude these files
+  exclude_file = []
+
+  # 排除正则匹配的文件（测试文件变化不需要重启服务）
+  # Exclude regex-matched files (test file changes don't need server restart)
+  exclude_regex = ["_test\\.go$"]
+
+  # 停止旧进程时发送的信号（SIGINT = Ctrl+C，触发优雅关停）
+  # Signal to stop the old process (SIGINT = Ctrl+C, triggers graceful shutdown)
+  stop_signal = "SIGINT"
+
+  # 发送停止信号后等待旧进程退出的时间
+  # Time to wait for the old process to exit after sending stop signal
+  kill_delay = 500
+
+  # 把 stderr 也输出（编译错误会显示在这里）
+  # Also output stderr (compilation errors show up here)
+  send_interrupt = true
+
+[log]
+  # 显示日志时间戳
+  # Show log timestamps
+  time = false
+
+  # 只显示主程序日志（不显示 Air 自身的详细日志）
+  # Only show main program logs (hide Air's verbose logs)
+  main_only = false
+
+[color]
+  # 不同类型日志的颜色
+  # Colors for different log types
+  main = "magenta"
+  watcher = "cyan"
+  build = "yellow"
+  runner = "green"
+
+[misc]
+  # 退出时清理 tmp 目录
+  # Clean tmp directory on exit
+  clean_on_exit = true
