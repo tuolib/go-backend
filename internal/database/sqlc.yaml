@@ -1,0 +1,14 @@
+version: "2"
+sql:
+  # sqlc 配置：从 SQL 查询文件自动生成类型安全的 Go 代码。
+  # sqlc config: auto-generates type-safe Go code from SQL query files.
+  - engine: "postgresql"
+    queries: "queries/"        # SQL 查询文件目录 / SQL query files directory
+    schema: "migrations/"      # 迁移文件目录（sqlc 从中推断表结构）/ Migration files directory (sqlc infers table structure from these)
+    gen:
+      go:
+        package: "gen"         # 生成的 Go 包名 / Generated Go package name
+        out: "gen"             # 生成代码的输出目录 / Output directory for generated code
+        sql_package: "pgx/v5"  # 使用 pgx v5 驱动（不是标准 database/sql）/ Use pgx v5 driver (not standard database/sql)
+        emit_json_tags: true   # 生成 JSON tag / Generate JSON tags
+        emit_empty_slices: true # 空结果返回 [] 而不是 nil / Empty results return [] instead of nil
