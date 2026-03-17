@@ -152,14 +152,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) error {
 	return json.NewEncoder(w).Encode(v)
 }
 
-// 用自定义类型做 context key，避免和其他包的 string key 冲突。
-// Use a custom type for context keys to avoid collisions with string keys from other packages.
+// ContextKey 自定义类型做 context key，避免和其他包的 string key 冲突。导出给 middleware 包共用。
+// ContextKey is a custom type for context keys to avoid collisions. Exported for use by the middleware package.
 //
 // 如果直接用 string("traceId")，两个不同包用同样的字符串就会互相覆盖。
 // If you use plain string("traceId"), two different packages with the same string would overwrite each other.
-type contextKey string
+type ContextKey string
 
-const traceIDKey contextKey = "traceId"
+// TraceIDKey traceId 的 context key。requestid 中间件写入，此包读取。
+// TraceIDKey is the context key for traceId. Written by requestid middleware, read by this package.
+const TraceIDKey ContextKey = "traceId"
 
 // traceIDFrom 从请求的 context 中提取 traceId。
 // traceIDFrom extracts the traceId from the request's context.
@@ -168,7 +170,7 @@ func traceIDFrom(r *http.Request) string {
 	// Type assertion .(string): safely extracts a string from the any-typed context value.
 	// ok=false 表示值不存在或类型不匹配。
 	// ok=false means the value doesn't exist or the type doesn't match.
-	if id, ok := r.Context().Value(traceIDKey).(string); ok {
+	if id, ok := r.Context().Value(TraceIDKey).(string); ok {
 		return id
 	}
 	return ""

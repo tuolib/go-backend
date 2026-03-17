@@ -23,6 +23,40 @@ Authorization: Bearer <accessToken>
 X-Idempotency-Key: <unique-string>
 ```
 
+### 请求追踪
+
+所有请求自动生成 traceId 并在响应头中返回：
+
+```
+X-Trace-Id: <nanoid>
+```
+
+客户端可以通过 `X-Request-Id` 请求头传入自定义 traceId（用于端到端追踪），未传入时自动生成。
+
+### 限流
+
+所有外部接口受限流保护（默认 100 次/分钟），响应头包含：
+
+```
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 95
+Retry-After: 60              # 仅超限时返回
+```
+
+### 跨域 (CORS)
+
+API 支持跨域访问，允许的 Origin 通过 `CORS_ORIGINS` 环境变量配置。预检请求（OPTIONS）自动处理，缓存 12 小时。
+
+### 内部接口鉴权
+
+`/internal/` 前缀的接口需要携带：
+
+```
+X-Internal-Secret: <shared-secret>
+```
+
+仅 Docker 内部网络可访问，外部请求会被拒绝。
+
 ### 响应格式
 
 ```json
