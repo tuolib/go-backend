@@ -7,6 +7,16 @@
 bin/
 dist/
 
+# go build 在根目录产生的编译产物（go build ./cmd/xxx/ 的默认输出）
+# Compiled binaries produced in root by go build ./cmd/xxx/ (default output)
+/gateway
+/user
+/product
+/cart
+/order
+/monolith
+/migrate
+
 # Test binary
 *.test
 
